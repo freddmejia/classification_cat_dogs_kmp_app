@@ -4,111 +4,104 @@ Guidance for Claude Code in this repository.
 
 ## Project status
 
-This project is a deep learning image classifier that labels a photo as **cat** or **dog**. It uses TensorFlow/Keras transfer learning on MobileNetV3Small.
+**ScannerCatDogs** is a Kotlin Multiplatform app (Android + iOS) that classifies a photo as **cat** or **dog** on-device, using the TFLite model published by the separate ML project.
 
 As of 2026-09-13:
-- **Notebook:** training, evaluation and export are in `CatDogClassifier TransferLearning.ipynb`.
-- **Current model:** test accuracy 0.9435, precision 0.9503, recall 0.936.
-- **Published release:** `release/v1.0.0/`, for use by apps (a Kotlin Multiplatform app in a separate project).
-- **Git:** branch `main`, remote `origin` (private GitHub repository).
+- **Scaffolding only.** `shared/src/commonMain` is still the KMP wizard template (`App.kt` with a "Click me!" button, `Greeting`, `Platform` expect/actual). Tests are `assertEquals(3, 1 + 2)` placeholders.
+- **Model assets are bundled** in `shared/src/androidMain/assets/` (release v1.0.0), but **no code reads them yet**.
+- **Not started:** camera capture, preprocessing, inference, classifier UI.
+- **Git:** branch `main`, no remote yet.
 
 **Read first:**
-- [CONTEXT.md](../../Documents/ai/classification/cat_dogs/CONTEXT.md): project history, all results, findings, open tasks.
-- [docs/MODEL_CONTRACT.md](../../Documents/ai/classification/cat_dogs/docs/MODEL_CONTRACT.md): the model's input/output interface. **Source of truth** for apps.
-- [docs/MODEL_RELEASE.md](../../Documents/ai/classification/cat_dogs/docs/MODEL_RELEASE.md): how to publish a new model version.
+- [docs/MODEL_CONTRACT.md](docs/MODEL_CONTRACT.md): the model's input/output interface. **The binding contract for this app.**
+- [docs/RESEARCH.md](docs/RESEARCH.md): verified library options and the chosen architecture.
 
-**Origin:** the notebook started as a port of the Colab notebook https://huggingface.co/Kavindutharaka/cat_dog_classifier/blob/main/cat_dog_classifier.ipynb.
+## Relationship to the ML project
 
-**Scope rule:** work only inside this folder (`C:\Users\Usuario\Documents\ai\classification\cat_dogs`). Do not read or modify sibling or parent directories. Apps may **read** `release/`, but must never write to it.
+The model is trained and published in a **separate project** at `C:\Users\Usuario\Documents\ai\classification\cat_dogs`.
 
-## Host environment (verified)
+- That project is **external and read-only** from here. Do not edit it as part of app work.
+- `docs/MODEL_CONTRACT.md` is a **copy** of the contract, kept in sync by hand. Never edit the copy to make app code pass; if the contract is wrong, it is fixed in the ML project and republished.
+- Model updates arrive as a new `release/vX.Y.Z/`. Version bumps mean:
+  - **MAJOR** (input/output changed) → **app code must change**;
+  - **MINOR** (runtime/architecture changed) → **re-verify on devices**;
+  - **PATCH** (weights only) → swap files, re-run the reference test.
 
-- **OS:** Windows 11 with WSL2; shell PowerShell 5.1 (Git Bash also available).
-- **GPU:** NVIDIA GeForce RTX 5060 Ti, 16 GB VRAM, driver 595.97 (Blackwell, compute capability 12.0).
-- **Docker:** Docker Desktop 28.3.3, Compose v2.39.2, with the `nvidia` container runtime registered. Docker Desktop must be running.
-- **Host Python:** 3.12.0 with no ML packages. **Run everything inside the container.** TensorFlow GPU does not run on native Windows.
+## Model interface (summary; the contract is authoritative)
 
-## Environment files
+- **Input:** tensor 0, `[1, 128, 128, 3]` NHWC, `float32`, **RGB**, **raw 0-255 values**.
+- **Normalization: none in the app.** The model contains `Rescaling(1/127.5, offset=-1)` internally. **Never divide by 255** - doing so yields ~0.55 for everything.
+- **Output:** tensor 0, `[1, 1]` `float32`, sigmoid probability of **dog**. `p > 0.5` means dog. Class order is `['cats', 'dogs']`.
+- **Preprocessing:** apply sensor rotation, center-crop to square (live camera only), resize to 128x128 bilinear, drop alpha (Android RGBA_8888; iOS BGRA also swaps B and R), write float32 RGB interleaved.
+- **Operators:** 8 built-in TFLite ops, no Flex/Select TF ops.
 
-| File | Purpose |
+### Reference test (run this after any change to the model, the preprocessing, or the runtime)
+
+Feed the bundled reference images through the app's own preprocessing **without center-crop**, using the default model:
+
+| Image | Expected | Label |
+|---|---|---|
+| `dog.png` | 0.99254 | dog |
+| `cat.jpg` | 0.00225 | cat |
+
+Pass if the label matches and the value is within **±0.02**. Platform resizing differs slightly from `tf.image.resize`, so small deviations are expected.
+
+## Assets
+
+| File | Size | Use |
+|---|---|---|
+| `shared/src/androidMain/assets/cat_dog_mobilenetv3.tflite` | 3.58 MB | **Default.** Float32; use for GPU |
+| `shared/src/androidMain/assets/cat_dog_mobilenetv3_optimized.tflite` | 1.08 MB | Dynamic-range quantized (int8 weights, float I/O). **CPU only** |
+| `shared/src/androidMain/assets/dog.png`, `cat.jpg` | 84 KB, 332 KB | Reference test images |
+
+- Assets live in `androidMain/assets/` so `AssetManager` (and LiteRT's `CompiledModel.create(context.assets, ...)`) can reach them. They are **not** in `commonMain/composeResources/`, because iOS is expected to ship a converted Core ML model rather than this `.tflite` (see RESEARCH.md).
+- **Verify SHA-256 against the contract** after replacing any model file.
+- Reference images currently ship in the APK. If that becomes unwanted, move them to a device-test source set rather than deleting them.
+
+## Planned architecture
+
+From [docs/RESEARCH.md](docs/RESEARCH.md):
+
+- **UI is shared** with Compose Multiplatform.
+- **Camera and inference are native per platform,** behind a common Kotlin `expect`/`actual` interface.
+- **Android:** LiteRT `com.google.ai.edge.litert:litert:2.2.0` (`CompiledModel` API, GPU accelerator built in) + CameraX 1.6.2 `ImageAnalysis` with `STRATEGY_KEEP_ONLY_LATEST` and `OUTPUT_IMAGE_FORMAT_RGBA_8888`.
+- **iOS:** try Core ML first (convert with `coremltools` in the ML project); fall back to the `TensorFlowLiteObjC` pod if conversion fails or accuracy differs.
+- **KMP camera/inference wrappers were evaluated and rejected** (CameraK delivers JPEG frames; peekaboo and moko-tensorflow are stale; kflite is alpha). Do not reach for them without re-reading RESEARCH.md.
+
+## Toolchain (verified 2026-09-13)
+
+| Item | Version |
 |---|---|
-| `env.yml` | Conda/micromamba env: python 3.12, jupyterlab and ipywidgets from conda-forge; `tensorflow[and-cuda]==2.21.*`, numpy, pandas, matplotlib, opendatasets and opencv-python-headless from pip |
-| `Dockerfile` | `mambaorg/micromamba:2.9.0-debian13`; installs `env.yml` into the base env; sets `LD_LIBRARY_PATH` to the pip `nvidia/*/lib` folders (required for the GPU, see GPU notes); fails the build if any notebook import breaks |
-| `docker-compose.yaml` | Service `notebook`: GPU reservation, JupyterLab on `127.0.0.1:8888`, `env_file: .env`, project bind-mounted at `/workspace`, named volumes `keras-cache` (ImageNet weights) and `nv-cache` |
-| `.env` / `.env.example` | Runtime secrets (`KAGGLE_API_TOKEN`). `.env` is git-ignored and docker-ignored, and Compose requires it to exist; copy `.env.example` to create it |
+| AGP | 9.0.1 |
+| Gradle wrapper | 9.1.0 |
+| Kotlin | 2.4.10 |
+| Compose Multiplatform | 1.11.1 |
+| compileSdk / targetSdk / minSdk | 36 / 36 / 24 |
+| JVM target | 11 (Gradle daemon toolchain: Azul 21) |
+| iOS targets | `iosArm64`, `iosSimulatorArm64`; static framework `Shared` |
 
-Add new dependencies to `env.yml`, then rebuild. Put anything that has to stay version-compatible with TensorFlow (such as numpy) in the `pip:` section, so one resolver handles it.
+Notes:
+- AGP 9 requires `com.android.kotlin.multiplatform.library` in `shared` and a separate `androidApp` module - that is why the project is split this way. Do not apply `com.android.library` to `shared`.
+- RESEARCH.md lists newer versions (AGP 9.4.0, Kotlin 2.4.20, CMP 1.12.0). Bumping AGP to 9.4.0 also requires the Gradle wrapper at 9.6.0+. Treat as a deliberate, separately verified change.
+- Versions are centralized in `gradle/libs.versions.toml`. Add dependencies there, not inline.
+- `org.gradle.configuration-cache=true` is on. Avoid build logic that reads state at execution time.
 
 ## Commands
 
 | Command | Purpose |
 |---|---|
-| `docker compose build` | Rebuild after changing `env.yml` or the Dockerfile |
-| `docker compose up -d` | Start JupyterLab at http://127.0.0.1:8888 (token `$JUPYTER_TOKEN`, default `catdogs`) |
-| `docker compose ps` | Check whether the `cat_dogs` container is running |
-| `docker compose logs -f notebook` | Follow JupyterLab logs |
-| `docker compose run --rm -T notebook python path/to/script.py` | Run a script in a throwaway container |
-| `docker compose down` | Stop and remove the container |
+| `./gradlew :androidApp:assembleDebug` | Build the Android app |
+| `./gradlew :shared:testAndroidHostTest` | Shared host (JVM) tests |
+| `./gradlew :shared:iosSimulatorArm64Test` | Shared iOS tests (macOS only) |
+| `./gradlew :androidApp:installDebug` | Install on a connected device/emulator |
 
-**The running `cat_dogs` container is the user's live JupyterLab workspace.**
-- Never run `up`, `down`, `restart` or rebuild-and-recreate without checking `docker compose ps` and asking first.
-- Run checks in throwaway containers instead: `docker compose run --rm`, or `docker run --rm` with the project mounted read-only.
-- Before editing the notebook file on disk, back it up and ask the user to reload it from disk before saving.
-
-## GPU notes (RTX 5060 Ti, Blackwell)
-
-Verified on 2026-09-13 with TF 2.21.0, cuDNN 9.26 and driver 595.97:
-- **Runtime compilation is expected.** The TF 2.21 wheels only include CUDA kernels up to compute capability 9.0, so on this 12.0 GPU TF logs `not built with CUDA kernel binaries compatible with compute capability 12.0a ... jit-compiled from PTX, which could take 30 minutes or longer`. It works: first GPU ops take about 7 s, and a MobileNetV3Small epoch then takes about 2 s.
-- **Without the Dockerfile's `LD_LIBRARY_PATH`,** TF can't load `libcusolver.so.11`. It prints `Cannot dlopen some GPU libraries` and **silently runs on the CPU** (`list_physical_devices('GPU')` returns `[]`). If the GPU list is ever empty, check this first.
-- **Known issue: compiled kernels aren't persisted yet.** `~/.nv` inside the `nv-cache` volume is owned by root, and the container user `mambauser` can't write to it. The fix is `mkdir -p /home/mambauser/.nv` plus `chown` in the Dockerfile, which needs a rebuild and a container restart; ask first.
-- **`cuda_timer.cc ... Delay kernel timed out`** errors during the first epoch are harmless autotuning noise.
-- **Version changes:** don't change the TensorFlow version, or the `nvidia-*` package versions it pulls in, without re-running the GPU check. The `LD_LIBRARY_PATH` folder list must match the installed packages.
-
-## Data
-
-- **Dataset:** Kaggle `dineshpiyasamara/cats-and-dogs-for-classification` (217 MB).
-- **Location:** `content/cats-and-dogs-for-classification/cats_dogs/{train,test}/{cats,dogs}`, git-ignored.
-- **Split:** train has 8,000 images (split 90/10 into train/val with `seed=42`); test has 2,000 (1,000 per class).
-- **Download:** use `kaggle.api.dataset_download_files("dineshpiyasamara/cats-and-dogs-for-classification", path="content", unzip=True)`. The notebook's `od.download(...)` is commented out.
-- **Kaggle credentials:** `KAGGLE_API_TOKEN` (`KGAT_...` format) lives in `.env` and reaches the container at runtime through `env_file`. **Never put it in the Dockerfile** (`ENV`/`ARG`), because it would stay in the image layers and in `docker history`.
-  - The `kaggle` package (1.8+, 2.2.4 installed) logs in from `KAGGLE_API_TOKEN` on `import kaggle`. Reuse `kaggle.api`.
-  - `opendatasets` ignores `KAGGLE_API_TOKEN`. It only reads `./kaggle.json` from the current working directory, and otherwise prompts for a username and key.
-  - **Security:** `CLASSIFIER CAT DOG USING TRANSFER L.txt` contains the real token and is committed (see CONTEXT.md §8). Never add secrets to tracked files.
-- **Classes:** `image_dataset_from_directory` sorts class folders alphabetically: `cats = 0`, `dogs = 1`. So sigmoid output > 0.5 means dog.
-
-## Current model and pipeline
-
-Details and all past runs are in [CONTEXT.md](../../Documents/ai/classification/cat_dogs/CONTEXT.md); the exported interface is in [docs/MODEL_CONTRACT.md](../../Documents/ai/classification/cat_dogs/docs/MODEL_CONTRACT.md).
-
-1. **Input:** 128×128 RGB, batch 32, **raw 0–255 pixels**.
-2. **Model (functional API):** `MobileNetV3Small(include_top=False, weights="imagenet")` called with `training=False`, then GAP, Dropout(0.2), Dense(1, sigmoid).
-3. **Stage 1:** backbone frozen, Adam 1e-3, EarlyStopping(val_loss, patience 15, restore best), then `model.save("checkpoints/stage1.keras")`.
-4. **Stage 2:** unfreeze the last 20 backbone layers, **set every BatchNormalization layer `trainable=False`**, Adam 1e-5, EarlyStopping patience 5.
-5. **Export:** `.keras`, `.weights.h5`, `.tflite`, optimized `.tflite`.
-
-**Lessons that must not be repeated:**
-- **Don't divide by 255 for MobileNetV3.** It includes `Rescaling(1/127.5, offset=-1)` and expects 0–255 input; dividing by 255 drops accuracy to about 0.75.
-- **In Keras 3.15.1, `base(inputs, training=False)` does not keep BatchNorm frozen after `base.trainable = True`.** Freeze every BN layer explicitly (`layer.trainable = False`) before recompiling, or fine-tuning degrades the model.
-- **Check that execution counts increase top to bottom before trusting metrics.** Stale kernel state once produced metrics from a different model. Use Restart Kernel and Run All Cells.
-- **Strong augmentation (`RandomRotation(0.2)` = ±72°) hurt the frozen head.** Prefer none, or flip plus rotation ≤ 0.1.
-- **`google.colab` can't be installed outside Colab.** Use `ipywidgets.FileUpload` or an image path.
-- **OpenCV loads BGR.** Convert with `cv2.cvtColor(img, cv2.COLOR_BGR2RGB)` before predicting.
-
-## Model releases
-
-- **When a notebook or architecture change should reach apps,** follow [docs/MODEL_RELEASE.md](../../Documents/ai/classification/cat_dogs/docs/MODEL_RELEASE.md). Every release has a type:
-  - **A: weights only**, PATCH version;
-  - **B: input/output change**, MAJOR version;
-  - **C: runtime change**, MINOR version.
-- **Each release is published in `release/vX.Y.Z/`,** with model files, reference images, a contract snapshot and `RELEASE_NOTES.md`. Never modify a published release; fixes go in a new version.
-- **Update [docs/MODEL_CONTRACT.md](../../Documents/ai/classification/cat_dogs/docs/MODEL_CONTRACT.md) and the CONTEXT.md results history** with every release.
-- **Claude memories are never moved between projects.** Anything the app side needs goes into the contract or release notes.
+The iOS app is built from Xcode by opening `iosApp/`. macOS and Xcode >= 26.4 are required; neither is available on this machine, so **iOS changes cannot be compiled or tested here** - say so rather than claiming they work.
 
 ## Conventions
 
 - Write all code in English, including identifiers and user-facing strings.
 - Do not add comments in code.
-- Reusable logic belongs in Python modules; notebooks are for exploration.
-- Preprocessing at inference time must match training: same resize and same scaling.
-- Keep data (`cats-and-dogs-for-classification/`, `data/`), `checkpoints/` and `outputs/` out of git. `.gitignore` already covers them.
-- The environment sets `TF_FORCE_GPU_ALLOW_GROWTH=true`. Don't hardcode GPU memory limits in code.
+- Reusable logic belongs in `shared/src/commonMain`; keep platform code to the thin `actual` layer.
+- **Preprocessing at inference time must match training:** same resize, same 0-255 scaling, RGB order.
+- Keep `build/`, `.gradle/`, `.kotlin/` and `local.properties` out of git (`.gitignore` covers them).
+- `.gitattributes` normalizes line endings to LF and marks `.tflite`/`.png`/`.jpg`/`.jar` binary - this repo is also opened on macOS for the iOS side.
