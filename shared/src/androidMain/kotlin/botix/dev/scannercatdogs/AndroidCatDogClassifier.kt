@@ -43,6 +43,19 @@ class AndroidCatDogClassifier(
         }
     }
 
+    fun lastInputAsBitmap(): Bitmap {
+        val size = ModelContract.INPUT_SIZE
+        val argb = IntArray(size * size)
+        var i = 0
+        for (index in argb.indices) {
+            val r = input[i++].toInt().coerceIn(0, 255)
+            val g = input[i++].toInt().coerceIn(0, 255)
+            val b = input[i++].toInt().coerceIn(0, 255)
+            argb[index] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+        }
+        return Bitmap.createBitmap(argb, size, size, Bitmap.Config.ARGB_8888)
+    }
+
     override fun close() {
         model.close()
     }

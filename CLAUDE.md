@@ -93,6 +93,21 @@ Things worth knowing before changing it:
 - There is a **6 s first-frame timeout**, so a dead camera surfaces as a failure instead of a spinner forever.
 - Scanning stops automatically on `ON_PAUSE`, so backgrounding the app does not leave inference running.
 - **The viewfinder square is indicative, not exact.** The classifier centre-crops a square from the *analysis* frame, while `PreviewView` uses `FILL_CENTER`, which crops differently for the screen's aspect ratio. The box is centred so it roughly matches; it is not pixel-accurate. Making it exact means mapping the analysis rect onto the preview.
+- **The model is severely orientation-sensitive - this is the single biggest correctness risk.** Measured with `CameraPathDiagnosticTest` on the known-good `dog.png`:
+
+| input | verdict | dog probability |
+|---|---|---|
+| upright | DOG | 0.992 |
+| rotated 90 | **CAT** | **0.050** |
+| rotated 180 | CAT | 0.218 |
+| rotated 270 | DOG | 0.767 |
+
+A sideways dog reads as a cat at 97% confidence. Any orientation mistake in the camera path shows up as "dogs are cats", not as low confidence. Verified on the emulator that the live path is correct: `rotationDegrees` is 90, `ImageProxy.toBitmap()` returns the frame **unrotated**, and the dumped tensor is upright. Do not add a second rotation anywhere.
+
+- **Centre-cropping measurably shifts predictions.** Training resized the whole image without preserving aspect; the camera path crops a square first. On `cat.jpg` that moves the score from 0.0023 to 0.277 - same verdict, far less margin. If borderline real-world cases misbehave, test full-frame squash (`FramePreparation.upright`) against centre-crop before assuming the model is at fault.
+
+- **`AndroidCatDogClassifier.lastInputAsBitmap()` returns the exact tensor last fed to the model**, rebuilt from the float array. Dump it as base64 to logcat to see precisely what the model saw - scoped storage blocks adb from reading app files, so logcat is the reliable channel. This is the fastest way to settle any "is it the app or the model" question.
+
 - **The model always answers cat or dog.** There is no "neither" class, so pointing at a wall still returns ~0.5-0.6. Any "nothing detected" behaviour would need a confidence floor, and that is a product decision.
 - Permission is re-checked on `ON_RESUME`, so granting it in Settings and coming back works.
 - **Rear and front lenses are both supported.** `lens` is the user's choice (default rear); the flip button only appears when `availableCameraInfos` reports both facings. `bindUseCases` tries the chosen lens and **falls back to the other one if binding throws**, so a device with only a front camera still works. Only if both fail does it report `Unavailable`.

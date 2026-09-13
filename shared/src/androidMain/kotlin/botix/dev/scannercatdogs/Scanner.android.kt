@@ -3,8 +3,6 @@ package botix.dev.scannercatdogs
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
-import android.graphics.Bitmap
-import android.graphics.Matrix
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
@@ -268,7 +266,7 @@ private class AndroidScanner(
             if (lastFrameAt != 0L && sinceLast < MIN_FRAME_INTERVAL_MS) return
             lastFrameAt = startedAt
             val outcome = runCatching {
-                val frame = uprightSquare(it.toBitmap(), it.imageInfo.rotationDegrees)
+                val frame = FramePreparation.uprightSquare(it.toBitmap(), it.imageInfo.rotationDegrees)
                 val engine = classifier
                     ?: AndroidCatDogClassifier(context.assets).also { created -> classifier = created }
                 engine.classify(frame).also { frame.recycle() }
@@ -302,16 +300,6 @@ private class AndroidScanner(
         }
         smoothed = blended
         return blended
-    }
-
-    private fun uprightSquare(source: Bitmap, rotationDegrees: Int): Bitmap {
-        val size = minOf(source.width, source.height)
-        val left = (source.width - size) / 2
-        val top = (source.height - size) / 2
-        val matrix = Matrix().apply {
-            if (rotationDegrees != 0) postRotate(rotationDegrees.toFloat())
-        }
-        return Bitmap.createBitmap(source, left, top, size, size, matrix, true)
     }
 
     fun release() {
