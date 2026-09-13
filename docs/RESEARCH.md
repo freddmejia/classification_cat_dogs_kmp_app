@@ -97,11 +97,16 @@ All well inside the contract's +/-0.02. The default model agreeing to ~1e-04 con
 6. **APK size:** adding LiteRT took the debug APK from ~18 MB to ~47 MB, since all three ABIs are bundled (~24 MB of `.so`). An ABI split or `abiFilters` is worth doing before release.
 7. **The `<uses-native-library libOpenCL.so>` question from the Android runtime table is answered:** LiteRT's own manifest already declares it, along with the OpenCL, Qualcomm, Google Tensor and MTK NPU libraries. Apps do not need to add it.
 
+8. **CameraX 1.6.2 works with this setup.** `ImageAnalysis` with `OUTPUT_IMAGE_FORMAT_RGBA_8888` + `STRATEGY_KEEP_ONLY_LATEST`, `ImageProxy.toBitmap()`, centre-crop and rotate, then straight into the classifier. Runs on an emulator with no crash. **Correctness of the live path is not proven** - only that it runs and returns plausible values. The reference-image test still covers model correctness.
+9. **`androidx.core:core-ktx:1.19.0` cannot be used here.** It demands compileSdk 37 and AGP 9.1+; this project is compileSdk 36 / AGP 9.0.1, so `checkDebugAarMetadata` fails. CameraX brings `androidx.core` transitively at a compatible version.
+10. **LiteRT injects five permissions** (`FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_DATA_SYNC`, `WAKE_LOCK`, `ACCESS_NETWORK_STATE`, `RECEIVE_BOOT_COMPLETED`) for AiPack model downloads. They are stripped with `tools:node="remove"`; the app still runs and scans.
+
 ## Checks not yet done
 
 1. Measure inference latency on a real device, CPU vs GPU, default vs optimized model.
 2. Core ML conversion with `coremltools` 9.0 in the ML project's Docker image (keep raw 0–255 image input: `ImageType(scale=1.0, bias=[0,0,0])`).
-3. Prove the CameraX `ImageAnalysis` RGBA → 128×128 float path gives the same result as the reference images.
+3. Prove the CameraX `ImageAnalysis` RGBA → 128×128 float path gives the *same numbers* as the reference images. The path runs, but has only been eyeballed; an emulator virtual-scene frame is not a known-answer input.
+4. Map the analysis crop rect onto `PreviewView` so the on-screen viewfinder marks exactly what is classified.
 
 ## Sources
 

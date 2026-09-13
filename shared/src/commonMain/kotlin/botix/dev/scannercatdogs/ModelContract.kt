@@ -13,4 +13,5 @@ object ModelContract {
 
 data class Classification(val dogProbability: Float) {
     val label: Label = if (dogProbability > ModelContract.DOG_THRESHOLD) Label.DOG else Label.CAT
+    val confidence: Float = if (label == Label.DOG) dogProbability else 1f - dogProbability
 }

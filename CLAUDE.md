@@ -8,8 +8,8 @@ Guidance for Claude Code in this repository.
 
 As of 2026-09-13:
 - **Android inference works and is verified against the contract.** `AndroidCatDogClassifier` (LiteRT `CompiledModel`) loads the model from assets and classifies a `Bitmap`; `ReferenceImageTest` proves both models match the reference outputs on a device.
-- **UI is still the KMP wizard template** (`App.kt` with a "Click me!" button, `Greeting`, `Platform` expect/actual). The classifier is not wired to any screen.
-- **Not started:** camera capture, the classifier UI, and the whole iOS inference path (`Platform.ios.kt` is still template code).
+- **The Android app works end to end:** one screen, live CameraX preview, a SCAN button, and the result on top. Verified running on an emulator.
+- **Not started: the entire iOS path.** `Scanner.ios.kt` is a stub reporting `CameraStatus.Unavailable`, so the iOS app builds and shows "Camera unavailable". It has never been compiled - there is no macOS here.
 - **Git:** branch `main`, no remote yet.
 
 **Read first:**
@@ -67,13 +67,34 @@ The test logs every measured value to logcat under the tag `ReferenceImageTest`,
 - Reference images currently ship in the APK. If that becomes unwanted, move them to a device-test source set rather than deleting them.
 - **`dog.png` is RGBA with a uniformly opaque alpha channel.** `BitmapFactory` premultiplies RGB by alpha; the reference came from OpenCV, which drops alpha without premultiplying. They agree only because the image is fully opaque. A future reference image with real transparency would break this **silently** - decode with `inPremultiplied = false` then, and note `Bitmap.createScaledBitmap` rejects unpremultiplied bitmaps, so the resize would have to be done by hand.
 
+## App structure
+
+One screen, `ScannerScreen`, over an `expect`/`actual` `Scanner`.
+
+| File | Source set | Role |
+|---|---|---|
+| `Scanner.kt` | commonMain | `Scanner` interface, `ScanState`, `CameraStatus`, and the `rememberScanner` / `CameraPreview` expects |
+| `ScannerScreen.kt` | commonMain | The whole UI. Pure Compose, no platform types |
+| `Theme.kt` | commonMain | Dark palette; `ScannerColors.Dog` is amber, `.Cat` is violet |
+| `Scanner.android.kt` | androidMain | CameraX + permission + LiteRT wiring |
+| `Scanner.ios.kt` | iosMain | Stub, always `Unavailable` |
+| `AndroidCatDogClassifier.kt` | androidMain | The model call. Knows nothing about the camera |
+
+Things worth knowing before changing it:
+
+- **Scanning is pull, not push.** `scan()` sets an `AtomicBoolean`; the next `ImageAnalysis` frame consumes it, classifies **on the analyser thread**, and posts the result. Nothing is converted per frame, so an idle preview allocates no bitmaps - do not "optimise" this back into caching the latest frame.
+- There is a **6 s timeout** on a scan, so a dead camera surfaces as a failure instead of a spinner forever.
+- **The viewfinder square is indicative, not exact.** The classifier centre-crops a square from the *analysis* frame, while `PreviewView` uses `FILL_CENTER`, which crops differently for the screen's aspect ratio. The box is centred so it roughly matches; it is not pixel-accurate. Making it exact means mapping the analysis rect onto the preview.
+- **The model always answers cat or dog.** There is no "neither" class, so pointing at a wall still returns ~0.5-0.6. Any "nothing detected" behaviour would need a confidence floor, and that is a product decision.
+- Permission is re-checked on `ON_RESUME`, so granting it in Settings and coming back works.
+
 ## Planned architecture
 
 From [docs/RESEARCH.md](docs/RESEARCH.md):
 
 - **UI is shared** with Compose Multiplatform.
 - **Camera and inference are native per platform,** behind a common Kotlin `expect`/`actual` interface.
-- **Android: done for inference.** LiteRT `com.google.ai.edge.litert:litert:2.2.0`. `CompiledModel` actually lives in the transitive `litert-api`; depending on `litert` is enough. The AAR ships `arm64-v8a`, `armeabi-v7a` and `x86_64` - **no `x86`**, so a 32-bit x86 emulator will not work. Still to come: CameraX 1.6.2 `ImageAnalysis` with `STRATEGY_KEEP_ONLY_LATEST` and `OUTPUT_IMAGE_FORMAT_RGBA_8888`.
+- **Android: done.** Camera and inference both work. LiteRT `com.google.ai.edge.litert:litert:2.2.0`. `CompiledModel` actually lives in the transitive `litert-api`; depending on `litert` is enough. The AAR ships `arm64-v8a`, `armeabi-v7a` and `x86_64` - **no `x86`**, so a 32-bit x86 emulator will not work. CameraX 1.6.2 `ImageAnalysis` with `STRATEGY_KEEP_ONLY_LATEST` and `OUTPUT_IMAGE_FORMAT_RGBA_8888` feeds it.
 - **iOS:** try Core ML first (convert with `coremltools` in the ML project); fall back to the `TensorFlowLiteObjC` pod if conversion fails or accuracy differs.
 - **KMP camera/inference wrappers were evaluated and rejected** (CameraK delivers JPEG frames; peekaboo and moko-tensorflow are stale; kflite is alpha). Do not reach for them without re-reading RESEARCH.md.
 
@@ -115,5 +136,7 @@ The iOS app is built from Xcode by opening `iosApp/`. macOS and Xcode >= 26.4 ar
 - **Preprocessing at inference time must match training:** same resize, same 0-255 scaling, RGB order.
 - Keep `build/`, `.gradle/`, `.kotlin/` and `local.properties` out of git (`.gitignore` covers them).
 - `java` is not on `PATH` here. Gradle needs `JAVA_HOME="/c/Program Files/Android/Android Studio/jbr"` (Git Bash) before `./gradlew`.
+- **Do not add `androidx.core:core-ktx` at the catalog's 1.19.0.** It requires compileSdk 37 and AGP 9.1+, and fails `checkDebugAarMetadata` on this project's compileSdk 36 / AGP 9.0.1. The entry sits unused in `libs.versions.toml`; `ContextCompat` already arrives transitively through CameraX.
+- **`androidApp/src/main/AndroidManifest.xml` strips five permissions with `tools:node="remove"`.** LiteRT's manifest contributes `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_DATA_SYNC`, `WAKE_LOCK`, `ACCESS_NETWORK_STATE` and `RECEIVE_BOOT_COMPLETED` for its AiPack model-download feature, which this app does not use - it loads the model from assets. The merged manifest is now just `CAMERA`. If AiPack is ever adopted, drop those removals.
 - **`android.uniquePackageNames=false` in `gradle.properties` is load-bearing - do not remove it.** `litert` and `litert-api` both declare the namespace `com.google.ai.edge.litert`. Building the `shared` library only warns, but merging that into `androidApp` is a hard error and `:androidApp:processDebugMainManifest` fails. Both artifacts are required, so the check has to be downgraded. The remaining warning is expected.
 - `.gitattributes` normalizes line endings to LF and marks `.tflite`/`.png`/`.jpg`/`.jar` binary - this repo is also opened on macOS for the iOS side.
