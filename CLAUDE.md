@@ -53,6 +53,8 @@ The default model agreeing to ~1e-04 means the preprocessing chain is right. **I
 
 The test logs every measured value to logcat under the tag `ReferenceImageTest`, so a failure shows how far it drifted.
 
+`ClassificationTest` (commonTest, no device needed) pins the output semantics: the single output is the **dog** score, `> 0.5` is dog, and `confidence` is `1 - score` for a cat. **0.002 means about 99.8% cat, not a weak cat call** - that inversion is the easy mistake, so it is asserted rather than assumed.
+
 ## Assets
 
 | File | Size | Use |
@@ -66,6 +68,7 @@ The test logs every measured value to logcat under the tag `ReferenceImageTest`,
 - Assets live in `androidMain/assets/` so `AssetManager` (and LiteRT's `CompiledModel.create(context.assets, ...)`) can reach them. They are **not** in `commonMain/composeResources/`, because iOS is expected to ship a converted Core ML model rather than this `.tflite` (see RESEARCH.md).
 - **Verify SHA-256 against the contract** after replacing any model file.
 - Reference images currently ship in the APK. If that becomes unwanted, move them to a device-test source set rather than deleting them.
+- **Neither reference image carries an EXIF orientation tag** (checked: both report `Orientation=None`). That is why `BitmapFactory`, which ignores EXIF, agrees with OpenCV, which applies it. A replacement reference image shot on a phone almost certainly *will* carry one, and would then be fed to the model rotated differently than the notebook fed it. Check EXIF before swapping a reference image.
 - **`dog.png` is RGBA with a uniformly opaque alpha channel.** `BitmapFactory` premultiplies RGB by alpha; the reference came from OpenCV, which drops alpha without premultiplying. They agree only because the image is fully opaque. A future reference image with real transparency would break this **silently** - decode with `inPremultiplied = false` then, and note `Bitmap.createScaledBitmap` rejects unpremultiplied bitmaps, so the resize would have to be done by hand.
 
 ## App structure
