@@ -13,11 +13,12 @@ actual fun CameraPreview(scanner: Scanner, modifier: Modifier) {
 
 private object IOSScanner : Scanner {
     override val scanState: ScanState = ScanState.Idle
+    override val isRunning: Boolean = false
     override val cameraStatus: CameraStatus = CameraStatus.Unavailable
     override val lens: Lens = Lens.BACK
     override val canSwitchLens: Boolean = false
     override fun requestPermission() {}
     override fun switchLens() {}
-    override fun scan() {}
-    override fun reset() {}
+    override fun start() {}
+    override fun stop() {}
 }

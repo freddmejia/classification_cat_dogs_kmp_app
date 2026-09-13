@@ -103,9 +103,11 @@ All well inside the contract's +/-0.02. The default model agreeing to ~1e-04 con
 
 11. **`ProcessCameraProvider.hasCamera()` opens the camera to answer.** Calling it for both facings at startup made the emulator open camera 1 (front), disconnect it, then bind camera 10 (rear) - and left the preview black. `provider.availableCameraInfos` with `CameraInfo.lensFacing` answers the same question from metadata, with a single camera open. Verified by the `Camera N: Opened` lines in logcat: three opens before, one after.
 
+12. **Live classification costs, measured on the Pixel_8 AVD.** Inference is ~2 ms per frame; the per-frame `ImageProxy.toBitmap()` + rotate/crop dominates. App CPU: **4-11% idle, 60-92% classifying every frame, 28-44% throttled to ~8 fps**. `ImageAnalysis.clearAnalyzer()` is an effective stop - CPU returns to idle and memory drops back.
+
 ## Checks not yet done
 
-1. Measure inference latency on a real device, CPU vs GPU, default vs optimized model.
+1. Measure inference latency on a **real device**, CPU vs GPU, default vs optimized model. Emulator numbers above are software-rendered and not representative.
 2. Core ML conversion with `coremltools` 9.0 in the ML project's Docker image (keep raw 0–255 image input: `ImageType(scale=1.0, bias=[0,0,0])`).
 3. Prove the CameraX `ImageAnalysis` RGBA → 128×128 float path gives the *same numbers* as the reference images. The path runs, but has only been eyeballed; an emulator virtual-scene frame is not a known-answer input.
 4. Map the analysis crop rect onto `PreviewView` so the on-screen viewfinder marks exactly what is classified.

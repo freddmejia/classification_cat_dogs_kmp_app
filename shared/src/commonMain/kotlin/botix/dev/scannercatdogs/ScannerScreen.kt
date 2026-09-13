@@ -37,11 +37,13 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
+private const val CONFIDENCE_FLOOR = 0.65f
+
 @Composable
 fun ScannerScreen(scanner: Scanner = rememberScanner()) {
     val state = scanner.scanState
     val status = scanner.cameraStatus
-    val accent by animateColorAsState(accentOf(state), tween(400))
+    val accent by animateColorAsState(accentOf(state), tween(250))
 
     Box(
         modifier = Modifier
@@ -73,7 +75,7 @@ fun ScannerScreen(scanner: Scanner = rememberScanner()) {
                 .padding(horizontal = 20.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            ResultBanner(state, status, accent, scanner::requestPermission)
+            ResultBanner(state, status, scanner.isRunning, accent, scanner::requestPermission)
             Spacer(Modifier.weight(1f))
             if (status == CameraStatus.Ready) {
                 Box(
@@ -81,9 +83,9 @@ fun ScannerScreen(scanner: Scanner = rememberScanner()) {
                     contentAlignment = Alignment.Center,
                 ) {
                     ScanButton(
-                        scanning = state is ScanState.Scanning,
+                        running = scanner.isRunning,
                         accent = accent,
-                        onClick = scanner::scan,
+                        onClick = { if (scanner.isRunning) scanner.stop() else scanner.start() },
                     )
                     if (scanner.canSwitchLens) {
                         LensButton(
@@ -95,7 +97,11 @@ fun ScannerScreen(scanner: Scanner = rememberScanner()) {
                 }
                 Spacer(Modifier.height(14.dp))
                 Text(
-                    text = if (state is ScanState.Success) "Tap to scan again" else "Point at a cat or a dog",
+                    text = when {
+                        scanner.isRunning -> "Live - tap stop to end"
+                        state is ScanState.Live -> "Stopped - tap scan to resume"
+                        else -> "Point at a cat or a dog"
+                    },
                     color = ScannerColors.OnSurfaceMuted,
                     fontSize = 13.sp,
                 )
@@ -109,6 +115,7 @@ fun ScannerScreen(scanner: Scanner = rememberScanner()) {
 private fun ResultBanner(
     state: ScanState,
     status: CameraStatus,
+    running: Boolean,
     accent: Color,
     onRequestPermission: () -> Unit,
 ) {
@@ -121,44 +128,53 @@ private fun ResultBanner(
             .padding(horizontal = 22.dp, vertical = 20.dp),
     ) {
         AnimatedContent(
-            targetState = BannerKey(state, status),
+            targetState = bannerKind(state, status),
             transitionSpec = { fadeIn(tween(260)) togetherWith fadeOut(tween(180)) },
-        ) { key ->
-            val keyState = key.state
-            when {
-                key.status == CameraStatus.Unavailable -> Message(
+        ) { kind ->
+            when (kind) {
+                BannerKind.Unavailable -> Message(
                     title = "Camera unavailable",
                     body = "This platform has no scanner yet.",
                 )
 
-                key.status == CameraStatus.PermissionRequired -> PermissionRequest(onRequestPermission)
+                BannerKind.Permission -> PermissionRequest(onRequestPermission)
 
-                key.status == CameraStatus.Starting -> Message(
+                BannerKind.Starting -> Message(
                     title = "Starting camera",
                     body = "One moment.",
                 )
 
-                keyState is ScanState.Failure -> Message(
+                BannerKind.Failure -> Message(
                     title = "Scan failed",
-                    body = keyState.message,
+                    body = (state as? ScanState.Failure)?.message ?: "",
                     titleColor = ScannerColors.Danger,
                 )
 
-                keyState is ScanState.Scanning -> Row(verticalAlignment = Alignment.CenterVertically) {
+                BannerKind.Waiting -> Row(verticalAlignment = Alignment.CenterVertically) {
                     CircularProgressIndicator(
                         modifier = Modifier.size(22.dp),
                         color = accent,
                         strokeWidth = 2.dp,
                     )
                     Spacer(Modifier.width(14.dp))
-                    Text("Analysing", color = ScannerColors.OnSurface, fontSize = 18.sp)
+                    Text("Starting live scan", color = ScannerColors.OnSurface, fontSize = 18.sp)
                 }
 
-                keyState is ScanState.Success -> ResultContent(keyState.classification, accent)
+                BannerKind.Result -> {
+                    val live = state as? ScanState.Live
+                    if (live != null) {
+                        ResultContent(
+                            classification = live.classification,
+                            latencyMs = live.latencyMs,
+                            live = running,
+                            accent = accent,
+                        )
+                    }
+                }
 
-                else -> Message(
+                BannerKind.Idle -> Message(
                     title = "Ready to scan",
-                    body = "Frame the animal and tap the button.",
+                    body = "Tap scan to start live detection.",
                 )
             }
         }
@@ -166,8 +182,13 @@ private fun ResultBanner(
 }
 
 @Composable
-private fun ResultContent(classification: Classification, accent: Color) {
-    val animated by animateFloatAsState(classification.confidence, tween(600))
+private fun ResultContent(
+    classification: Classification,
+    latencyMs: Int,
+    live: Boolean,
+    accent: Color,
+) {
+    val animated by animateFloatAsState(classification.confidence, tween(if (live) 160 else 600))
     Column {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(
@@ -178,9 +199,13 @@ private fun ResultContent(classification: Classification, accent: Color) {
             )
             Spacer(Modifier.width(12.dp))
             Text(
-                text = if (classification.label == Label.DOG) "DOG" else "CAT",
+                text = when {
+                    classification.confidence < CONFIDENCE_FLOOR -> "NOT SURE"
+                    classification.label == Label.DOG -> "DOG"
+                    else -> "CAT"
+                },
                 color = ScannerColors.OnSurface,
-                fontSize = 44.sp,
+                fontSize = if (classification.confidence < CONFIDENCE_FLOOR) 30.sp else 44.sp,
             )
             Spacer(Modifier.weight(1f))
             Text(
@@ -207,7 +232,11 @@ private fun ResultContent(classification: Classification, accent: Color) {
         }
         Spacer(Modifier.height(10.dp))
         Text(
-            text = "dog probability " + decimalText(classification.dogProbability),
+            text = if (live) {
+                "live - dog probability " + decimalText(classification.dogProbability) + " - " + latencyMs + " ms"
+            } else {
+                "stopped - dog probability " + decimalText(classification.dogProbability)
+            },
             color = ScannerColors.OnSurfaceMuted,
             fontSize = 12.sp,
         )
@@ -258,8 +287,9 @@ private fun Viewfinder(accent: Color, modifier: Modifier) {
 }
 
 @Composable
-private fun ScanButton(scanning: Boolean, accent: Color, onClick: () -> Unit) {
-    val ring by animateFloatAsState(if (scanning) 0.3f else 1f, tween(300))
+private fun ScanButton(running: Boolean, accent: Color, onClick: () -> Unit) {
+    val ring by animateFloatAsState(if (running) 0.9f else 1f, tween(300))
+    val fill = if (running) ScannerColors.Danger else ScannerColors.OnSurface
     Box(
         modifier = Modifier
             .size(80.dp)
@@ -267,24 +297,16 @@ private fun ScanButton(scanning: Boolean, accent: Color, onClick: () -> Unit) {
             .border(3.dp, accent.copy(alpha = ring), CircleShape)
             .padding(7.dp)
             .clip(CircleShape)
-            .background(if (scanning) ScannerColors.SurfaceVariant else ScannerColors.OnSurface)
-            .clickable(enabled = !scanning, onClick = onClick),
+            .background(fill)
+            .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        if (scanning) {
-            CircularProgressIndicator(
-                modifier = Modifier.size(26.dp),
-                color = accent,
-                strokeWidth = 2.dp,
-            )
-        } else {
-            Text(
-                text = "SCAN",
-                color = ScannerColors.Background,
-                fontSize = 13.sp,
-                textAlign = TextAlign.Center,
-            )
-        }
+        Text(
+            text = if (running) "STOP" else "SCAN",
+            color = if (running) ScannerColors.OnSurface else ScannerColors.Background,
+            fontSize = 13.sp,
+            textAlign = TextAlign.Center,
+        )
     }
 }
 
@@ -308,11 +330,22 @@ private fun LensButton(lens: Lens, onClick: () -> Unit, modifier: Modifier) {
     }
 }
 
-private data class BannerKey(val state: ScanState, val status: CameraStatus)
+private enum class BannerKind { Unavailable, Permission, Starting, Failure, Waiting, Result, Idle }
 
-private fun accentOf(state: ScanState): Color = when (state) {
-    is ScanState.Success -> accentFor(state.classification.label)
-    is ScanState.Failure -> ScannerColors.Danger
+private fun bannerKind(state: ScanState, status: CameraStatus): BannerKind = when {
+    status == CameraStatus.Unavailable -> BannerKind.Unavailable
+    status == CameraStatus.PermissionRequired -> BannerKind.Permission
+    status == CameraStatus.Starting -> BannerKind.Starting
+    state is ScanState.Failure -> BannerKind.Failure
+    state is ScanState.Waiting -> BannerKind.Waiting
+    state is ScanState.Live -> BannerKind.Result
+    else -> BannerKind.Idle
+}
+
+private fun accentOf(state: ScanState): Color = when {
+    state is ScanState.Live && state.classification.confidence >= CONFIDENCE_FLOOR ->
+        accentFor(state.classification.label)
+    state is ScanState.Failure -> ScannerColors.Danger
     else -> ScannerColors.Neutral
 }
 

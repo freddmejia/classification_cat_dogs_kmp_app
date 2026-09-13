@@ -16,8 +16,8 @@ import androidx.camera.view.PreviewView
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -32,12 +32,13 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-private const val SCAN_TIMEOUT_MS = 6000L
+private const val FIRST_FRAME_TIMEOUT_MS = 6000L
+private const val SMOOTHING = 0.35f
+private const val MIN_FRAME_INTERVAL_MS = 120L
 
 @Composable
 actual fun rememberScanner(): Scanner {
@@ -57,7 +58,11 @@ actual fun rememberScanner(): Scanner {
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner, scanner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) scanner.refreshPermission()
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> scanner.refreshPermission()
+                Lifecycle.Event.ON_PAUSE -> scanner.stop()
+                else -> Unit
+            }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
@@ -94,10 +99,11 @@ private class AndroidScanner(
     override var scanState: ScanState by mutableStateOf(ScanState.Idle)
         private set
 
-    override var cameraStatus: CameraStatus by mutableStateOf(CameraStatus.Starting)
+    override var isRunning: Boolean by mutableStateOf(false)
         private set
 
-    var permissionRequester: (() -> Unit)? = null
+    override var cameraStatus: CameraStatus by mutableStateOf(CameraStatus.Starting)
+        private set
 
     override var lens: Lens by mutableStateOf(Lens.BACK)
         private set
@@ -105,10 +111,22 @@ private class AndroidScanner(
     override var canSwitchLens: Boolean by mutableStateOf(false)
         private set
 
+    var permissionRequester: (() -> Unit)? = null
+
     private val analysisExecutor: ExecutorService = Executors.newSingleThreadExecutor()
-    private val pendingScan = AtomicBoolean(false)
+
+    @Volatile
+    private var running = false
+
+    @Volatile
+    private var smoothed: Float? = null
+
+    @Volatile
+    private var lastFrameAt = 0L
+
     private var classifier: AndroidCatDogClassifier? = null
     private var cameraProvider: ProcessCameraProvider? = null
+    private var analysis: ImageAnalysis? = null
     private var previewView: PreviewView? = null
     private var owner: LifecycleOwner? = null
     private var boundLens: Lens? = null
@@ -133,26 +151,41 @@ private class AndroidScanner(
         permissionRequester?.invoke()
     }
 
-    override fun reset() {
-        scanState = ScanState.Idle
-    }
-
-    override fun scan() {
-        if (scanState is ScanState.Scanning) return
-        scanState = ScanState.Scanning
-        pendingScan.set(true)
+    override fun start() {
+        if (released || isRunning) return
+        isRunning = true
+        running = true
+        smoothed = null
+        scanState = ScanState.Waiting
+        lastFrameAt = 0L
+        attachAnalyzer()
         scope.launch {
-            delay(SCAN_TIMEOUT_MS)
-            if (pendingScan.compareAndSet(true, false)) {
-                scanState = ScanState.Failure("No camera frame arrived.")
+            delay(FIRST_FRAME_TIMEOUT_MS)
+            if (running && scanState is ScanState.Waiting) {
+                stop()
+                scanState = ScanState.Failure("No camera frames arrived.")
             }
         }
+    }
+
+    override fun stop() {
+        if (!isRunning) return
+        running = false
+        isRunning = false
+        runCatching { analysis?.clearAnalyzer() }
+        if (scanState is ScanState.Waiting) scanState = ScanState.Idle
     }
 
     override fun switchLens() {
         if (!canSwitchLens) return
         lens = if (lens == Lens.BACK) Lens.FRONT else Lens.BACK
+        smoothed = null
         cameraProvider?.let { bindUseCases(it) }
+    }
+
+    private fun attachAnalyzer() {
+        val target = analysis ?: return
+        if (running) target.setAnalyzer(analysisExecutor, ::onFrame) else target.clearAnalyzer()
     }
 
     fun bind(view: PreviewView, lifecycleOwner: LifecycleOwner) {
@@ -198,26 +231,30 @@ private class AndroidScanner(
 
         val attempts = if (lens == Lens.BACK) listOf(Lens.BACK, Lens.FRONT) else listOf(Lens.FRONT, Lens.BACK)
         for (attempt in attempts) {
+            var built: ImageAnalysis? = null
             val bound = runCatching {
                 val preview = Preview.Builder().build().apply {
                     surfaceProvider = view.surfaceProvider
                 }
-                val analysis = ImageAnalysis.Builder()
+                val imageAnalysis = ImageAnalysis.Builder()
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                     .build()
-                    .apply { setAnalyzer(analysisExecutor, ::onFrame) }
+                built = imageAnalysis
                 provider.unbindAll()
-                provider.bindToLifecycle(lifecycleOwner, selectorFor(attempt), preview, analysis)
+                provider.bindToLifecycle(lifecycleOwner, selectorFor(attempt), preview, imageAnalysis)
             }.isSuccess
             if (bound) {
+                analysis = built
                 lens = attempt
                 boundLens = attempt
                 boundOwner = lifecycleOwner
                 cameraStatus = CameraStatus.Ready
+                attachAnalyzer()
                 return
             }
         }
+        analysis = null
         boundLens = null
         boundOwner = null
         cameraStatus = CameraStatus.Unavailable
@@ -225,20 +262,46 @@ private class AndroidScanner(
 
     private fun onFrame(image: ImageProxy) {
         image.use {
-            if (released || !pendingScan.compareAndSet(true, false)) return
-            val result = runCatching {
+            if (released || !running) return
+            val startedAt = System.nanoTime()
+            val sinceLast = (startedAt - lastFrameAt) / 1_000_000L
+            if (lastFrameAt != 0L && sinceLast < MIN_FRAME_INTERVAL_MS) return
+            lastFrameAt = startedAt
+            val outcome = runCatching {
                 val frame = uprightSquare(it.toBitmap(), it.imageInfo.rotationDegrees)
                 val engine = classifier
                     ?: AndroidCatDogClassifier(context.assets).also { created -> classifier = created }
                 engine.classify(frame).also { frame.recycle() }
             }
-            scope.launch {
-                scanState = result.fold(
-                    onSuccess = { classification -> ScanState.Success(classification) },
-                    onFailure = { error -> ScanState.Failure(error.message ?: "Classification failed.") },
-                )
-            }
+            val latencyMs = ((System.nanoTime() - startedAt) / 1_000_000L).toInt()
+            outcome.fold(
+                onSuccess = { classification ->
+                    val blended = smooth(classification.dogProbability)
+                    scope.launch {
+                        if (running) scanState = ScanState.Live(Classification(blended), latencyMs)
+                    }
+                },
+                onFailure = { error ->
+                    running = false
+                    scope.launch {
+                        isRunning = false
+                        runCatching { analysis?.clearAnalyzer() }
+                        scanState = ScanState.Failure(error.message ?: "Classification failed.")
+                    }
+                },
+            )
         }
+    }
+
+    private fun smooth(probability: Float): Float {
+        val previous = smoothed
+        val blended = if (previous == null) {
+            probability
+        } else {
+            SMOOTHING * probability + (1f - SMOOTHING) * previous
+        }
+        smoothed = blended
+        return blended
     }
 
     private fun uprightSquare(source: Bitmap, rotationDegrees: Int): Bitmap {
@@ -253,8 +316,11 @@ private class AndroidScanner(
 
     fun release() {
         released = true
-        pendingScan.set(false)
+        running = false
+        isRunning = false
+        runCatching { analysis?.clearAnalyzer() }
         runCatching { cameraProvider?.unbindAll() }
+        analysis = null
         cameraProvider = null
         previewView = null
         owner = null

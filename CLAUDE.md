@@ -8,7 +8,7 @@ Guidance for Claude Code in this repository.
 
 As of 2026-09-13:
 - **Android inference works and is verified against the contract.** `AndroidCatDogClassifier` (LiteRT `CompiledModel`) loads the model from assets and classifies a `Bitmap`; `ReferenceImageTest` proves both models match the reference outputs on a device.
-- **The Android app works end to end:** one screen, live CameraX preview, a SCAN button, and the result on top. Verified running on an emulator.
+- **The Android app works end to end:** one screen, live CameraX preview, a SCAN/STOP toggle, and a **continuously updating** result on top. Verified running on an emulator.
 - **Not started: the entire iOS path.** `Scanner.ios.kt` is a stub reporting `CameraStatus.Unavailable`, so the iOS app builds and shows "Camera unavailable". **That message is hardcoded, not a permission failure** - there is no camera code on iOS at all. It has never been compiled; there is no macOS here.
 - `Info.plist` now carries `NSCameraUsageDescription`. iOS **kills the app** rather than denying it if that key is missing when the camera is touched, so it has to be in place before any AVFoundation work starts.
 - **Git:** branch `main`, no remote yet.
@@ -83,8 +83,12 @@ One screen, `ScannerScreen`, over an `expect`/`actual` `Scanner`.
 
 Things worth knowing before changing it:
 
-- **Scanning is pull, not push.** `scan()` sets an `AtomicBoolean`; the next `ImageAnalysis` frame consumes it, classifies **on the analyser thread**, and posts the result. Nothing is converted per frame, so an idle preview allocates no bitmaps - do not "optimise" this back into caching the latest frame.
-- There is a **6 s timeout** on a scan, so a dead camera surfaces as a failure instead of a spinner forever.
+- **Scanning is continuous and explicitly started.** `start()` attaches the `ImageAnalysis` analyser, `stop()` calls `clearAnalyzer()`. Stop is a real stop: with the analyser cleared CameraX delivers no frames at all, rather than delivering frames that get discarded. Measured on the emulator: **4-11% CPU stopped, 28-44% running**. Nothing is classified until the user taps scan.
+- **Frames are throttled to `MIN_FRAME_INTERVAL_MS` (120 ms, about 8 fps).** Inference itself is only ~2 ms; the cost is `toBitmap()` plus the rotate/crop per frame. Unthrottled it ran at 60-92% CPU on the emulator. Do not remove the throttle to "make it smoother" - the label does not need 30 fps.
+- **The displayed probability is smoothed** with an exponential moving average (`SMOOTHING`, 0.35). Raw per-frame output jitters badly, and at ~0.5 the label would flip every frame. The reference test calls `AndroidCatDogClassifier` directly, so it sees **raw, unsmoothed** values and is unaffected.
+- **Below `CONFIDENCE_FLOOR` (0.65) the banner says NOT SURE** in neutral grey instead of guessing. This is app policy, not model behaviour - the model has no "neither" class and always returns a cat/dog probability. **The 0.65 is a guess; tune it against real photos.**
+- There is a **6 s first-frame timeout**, so a dead camera surfaces as a failure instead of a spinner forever.
+- Scanning stops automatically on `ON_PAUSE`, so backgrounding the app does not leave inference running.
 - **The viewfinder square is indicative, not exact.** The classifier centre-crops a square from the *analysis* frame, while `PreviewView` uses `FILL_CENTER`, which crops differently for the screen's aspect ratio. The box is centred so it roughly matches; it is not pixel-accurate. Making it exact means mapping the analysis rect onto the preview.
 - **The model always answers cat or dog.** There is no "neither" class, so pointing at a wall still returns ~0.5-0.6. Any "nothing detected" behaviour would need a confidence floor, and that is a product decision.
 - Permission is re-checked on `ON_RESUME`, so granting it in Settings and coming back works.

@@ -6,8 +6,8 @@ import androidx.compose.ui.Modifier
 
 sealed interface ScanState {
     data object Idle : ScanState
-    data object Scanning : ScanState
-    data class Success(val classification: Classification) : ScanState
+    data object Waiting : ScanState
+    data class Live(val classification: Classification, val latencyMs: Int) : ScanState
     data class Failure(val message: String) : ScanState
 }
 
@@ -18,13 +18,14 @@ enum class Lens { BACK, FRONT }
 @Stable
 interface Scanner {
     val scanState: ScanState
+    val isRunning: Boolean
     val cameraStatus: CameraStatus
     val lens: Lens
     val canSwitchLens: Boolean
     fun requestPermission()
     fun switchLens()
-    fun scan()
-    fun reset()
+    fun start()
+    fun stop()
 }
 
 @Composable
