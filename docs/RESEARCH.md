@@ -101,6 +101,8 @@ All well inside the contract's +/-0.02. The default model agreeing to ~1e-04 con
 9. **`androidx.core:core-ktx:1.19.0` cannot be used here.** It demands compileSdk 37 and AGP 9.1+; this project is compileSdk 36 / AGP 9.0.1, so `checkDebugAarMetadata` fails. CameraX brings `androidx.core` transitively at a compatible version.
 10. **LiteRT injects five permissions** (`FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_DATA_SYNC`, `WAKE_LOCK`, `ACCESS_NETWORK_STATE`, `RECEIVE_BOOT_COMPLETED`) for AiPack model downloads. They are stripped with `tools:node="remove"`; the app still runs and scans.
 
+11. **`ProcessCameraProvider.hasCamera()` opens the camera to answer.** Calling it for both facings at startup made the emulator open camera 1 (front), disconnect it, then bind camera 10 (rear) - and left the preview black. `provider.availableCameraInfos` with `CameraInfo.lensFacing` answers the same question from metadata, with a single camera open. Verified by the `Camera N: Opened` lines in logcat: three opens before, one after.
+
 ## Checks not yet done
 
 1. Measure inference latency on a real device, CPU vs GPU, default vs optimized model.

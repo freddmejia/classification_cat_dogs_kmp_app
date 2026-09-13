@@ -9,7 +9,8 @@ Guidance for Claude Code in this repository.
 As of 2026-09-13:
 - **Android inference works and is verified against the contract.** `AndroidCatDogClassifier` (LiteRT `CompiledModel`) loads the model from assets and classifies a `Bitmap`; `ReferenceImageTest` proves both models match the reference outputs on a device.
 - **The Android app works end to end:** one screen, live CameraX preview, a SCAN button, and the result on top. Verified running on an emulator.
-- **Not started: the entire iOS path.** `Scanner.ios.kt` is a stub reporting `CameraStatus.Unavailable`, so the iOS app builds and shows "Camera unavailable". It has never been compiled - there is no macOS here.
+- **Not started: the entire iOS path.** `Scanner.ios.kt` is a stub reporting `CameraStatus.Unavailable`, so the iOS app builds and shows "Camera unavailable". **That message is hardcoded, not a permission failure** - there is no camera code on iOS at all. It has never been compiled; there is no macOS here.
+- `Info.plist` now carries `NSCameraUsageDescription`. iOS **kills the app** rather than denying it if that key is missing when the camera is touched, so it has to be in place before any AVFoundation work starts.
 - **Git:** branch `main`, no remote yet.
 
 **Read first:**
@@ -87,6 +88,9 @@ Things worth knowing before changing it:
 - **The viewfinder square is indicative, not exact.** The classifier centre-crops a square from the *analysis* frame, while `PreviewView` uses `FILL_CENTER`, which crops differently for the screen's aspect ratio. The box is centred so it roughly matches; it is not pixel-accurate. Making it exact means mapping the analysis rect onto the preview.
 - **The model always answers cat or dog.** There is no "neither" class, so pointing at a wall still returns ~0.5-0.6. Any "nothing detected" behaviour would need a confidence floor, and that is a product decision.
 - Permission is re-checked on `ON_RESUME`, so granting it in Settings and coming back works.
+- **Rear and front lenses are both supported.** `lens` is the user's choice (default rear); the flip button only appears when `availableCameraInfos` reports both facings. `bindUseCases` tries the chosen lens and **falls back to the other one if binding throws**, so a device with only a front camera still works. Only if both fail does it report `Unavailable`.
+- **Never use `ProcessCameraProvider.hasCamera()` for this.** It physically opens the camera to probe it: on the emulator that opened the front camera, disconnected it, and left the rear preview black. `availableCameraInfos` + `CameraInfo.lensFacing` reads the same facts as metadata without opening anything.
+- The front camera preview is mirrored by `PreviewView`, but `ImageAnalysis` frames are **not**. That is fine here - a horizontal flip does not change cat vs dog - but it matters for anything orientation-sensitive.
 
 ## Planned architecture
 

@@ -76,11 +76,23 @@ fun ScannerScreen(scanner: Scanner = rememberScanner()) {
             ResultBanner(state, status, accent, scanner::requestPermission)
             Spacer(Modifier.weight(1f))
             if (status == CameraStatus.Ready) {
-                ScanButton(
-                    scanning = state is ScanState.Scanning,
-                    accent = accent,
-                    onClick = scanner::scan,
-                )
+                Box(
+                    modifier = Modifier.fillMaxWidth(),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    ScanButton(
+                        scanning = state is ScanState.Scanning,
+                        accent = accent,
+                        onClick = scanner::scan,
+                    )
+                    if (scanner.canSwitchLens) {
+                        LensButton(
+                            lens = scanner.lens,
+                            onClick = scanner::switchLens,
+                            modifier = Modifier.align(Alignment.CenterEnd),
+                        )
+                    }
+                }
                 Spacer(Modifier.height(14.dp))
                 Text(
                     text = if (state is ScanState.Success) "Tap to scan again" else "Point at a cat or a dog",
@@ -273,6 +285,26 @@ private fun ScanButton(scanning: Boolean, accent: Color, onClick: () -> Unit) {
                 textAlign = TextAlign.Center,
             )
         }
+    }
+}
+
+@Composable
+private fun LensButton(lens: Lens, onClick: () -> Unit, modifier: Modifier) {
+    Box(
+        modifier = modifier
+            .size(56.dp)
+            .clip(CircleShape)
+            .background(ScannerColors.Surface.copy(alpha = 0.9f))
+            .border(1.dp, ScannerColors.Outline, CircleShape)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = if (lens == Lens.BACK) "TO\nFRONT" else "TO\nREAR",
+            color = ScannerColors.OnSurface,
+            fontSize = 10.sp,
+            textAlign = TextAlign.Center,
+        )
     }
 }
 

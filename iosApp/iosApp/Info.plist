@@ -4,5 +4,7 @@
 <dict>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>ScannerCatDogs uses the camera to tell whether you are pointing at a cat or a dog. Images are classified on the device and never leave it.</string>
 </dict>
 </plist>

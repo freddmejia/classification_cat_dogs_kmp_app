@@ -13,11 +13,16 @@ sealed interface ScanState {
 
 enum class CameraStatus { Starting, PermissionRequired, Ready, Unavailable }
 
+enum class Lens { BACK, FRONT }
+
 @Stable
 interface Scanner {
     val scanState: ScanState
     val cameraStatus: CameraStatus
+    val lens: Lens
+    val canSwitchLens: Boolean
     fun requestPermission()
+    fun switchLens()
     fun scan()
     fun reset()
 }

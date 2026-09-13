@@ -99,10 +99,20 @@ private class AndroidScanner(
 
     var permissionRequester: (() -> Unit)? = null
 
+    override var lens: Lens by mutableStateOf(Lens.BACK)
+        private set
+
+    override var canSwitchLens: Boolean by mutableStateOf(false)
+        private set
+
     private val analysisExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val pendingScan = AtomicBoolean(false)
     private var classifier: AndroidCatDogClassifier? = null
-    private var boundTo: LifecycleOwner? = null
+    private var cameraProvider: ProcessCameraProvider? = null
+    private var previewView: PreviewView? = null
+    private var owner: LifecycleOwner? = null
+    private var boundLens: Lens? = null
+    private var boundOwner: LifecycleOwner? = null
     private var released = false
 
     fun refreshPermission() {
@@ -139,14 +149,56 @@ private class AndroidScanner(
         }
     }
 
+    override fun switchLens() {
+        if (!canSwitchLens) return
+        lens = if (lens == Lens.BACK) Lens.FRONT else Lens.BACK
+        cameraProvider?.let { bindUseCases(it) }
+    }
+
     fun bind(view: PreviewView, lifecycleOwner: LifecycleOwner) {
-        if (released || boundTo === lifecycleOwner) return
-        boundTo = lifecycleOwner
+        if (released) return
+        previewView = view
+        owner = lifecycleOwner
+        val existing = cameraProvider
+        if (existing != null) {
+            bindUseCases(existing)
+            return
+        }
         val future = ProcessCameraProvider.getInstance(context)
         future.addListener({
             if (released) return@addListener
-            runCatching {
-                val provider = future.get()
+            runCatching { future.get() }
+                .onSuccess { provider ->
+                    cameraProvider = provider
+                    bindUseCases(provider)
+                    detectLenses(provider)
+                }
+                .onFailure { cameraStatus = CameraStatus.Unavailable }
+        }, ContextCompat.getMainExecutor(context))
+    }
+
+    private fun detectLenses(provider: ProcessCameraProvider) {
+        val facings = runCatching {
+            provider.availableCameraInfos.mapNotNull { runCatching { it.lensFacing }.getOrNull() }
+        }.getOrDefault(emptyList())
+        canSwitchLens = facings.contains(CameraSelector.LENS_FACING_BACK) &&
+            facings.contains(CameraSelector.LENS_FACING_FRONT)
+    }
+
+    private fun selectorFor(value: Lens): CameraSelector = when (value) {
+        Lens.BACK -> CameraSelector.DEFAULT_BACK_CAMERA
+        Lens.FRONT -> CameraSelector.DEFAULT_FRONT_CAMERA
+    }
+
+    private fun bindUseCases(provider: ProcessCameraProvider) {
+        if (released) return
+        val view = previewView ?: return
+        val lifecycleOwner = owner ?: return
+        if (boundLens == lens && boundOwner === lifecycleOwner) return
+
+        val attempts = if (lens == Lens.BACK) listOf(Lens.BACK, Lens.FRONT) else listOf(Lens.FRONT, Lens.BACK)
+        for (attempt in attempts) {
+            val bound = runCatching {
                 val preview = Preview.Builder().build().apply {
                     surfaceProvider = view.surfaceProvider
                 }
@@ -156,17 +208,19 @@ private class AndroidScanner(
                     .build()
                     .apply { setAnalyzer(analysisExecutor, ::onFrame) }
                 provider.unbindAll()
-                provider.bindToLifecycle(
-                    lifecycleOwner,
-                    CameraSelector.DEFAULT_BACK_CAMERA,
-                    preview,
-                    analysis,
-                )
-            }.onFailure {
-                boundTo = null
-                cameraStatus = CameraStatus.Unavailable
+                provider.bindToLifecycle(lifecycleOwner, selectorFor(attempt), preview, analysis)
+            }.isSuccess
+            if (bound) {
+                lens = attempt
+                boundLens = attempt
+                boundOwner = lifecycleOwner
+                cameraStatus = CameraStatus.Ready
+                return
             }
-        }, ContextCompat.getMainExecutor(context))
+        }
+        boundLens = null
+        boundOwner = null
+        cameraStatus = CameraStatus.Unavailable
     }
 
     private fun onFrame(image: ImageProxy) {
@@ -200,6 +254,12 @@ private class AndroidScanner(
     fun release() {
         released = true
         pendingScan.set(false)
+        runCatching { cameraProvider?.unbindAll() }
+        cameraProvider = null
+        previewView = null
+        owner = null
+        boundOwner = null
+        boundLens = null
         analysisExecutor.shutdown()
         runCatching { analysisExecutor.awaitTermination(500, TimeUnit.MILLISECONDS) }
         classifier?.close()
