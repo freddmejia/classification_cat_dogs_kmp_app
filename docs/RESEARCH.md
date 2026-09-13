@@ -27,14 +27,14 @@ Research done on 2026-09-13 from the ML project. Versions come from registries a
 
 | Library | Coordinates | Version | Notes |
 |---|---|---|---|
-| LiteRT (TensorFlow Lite's new name) | `com.google.ai.edge.litert:litert` | **2.2.0** (GitHub release 2026-08-13) | Includes the `CompiledModel` API (CPU/GPU/NPU) **and** the `Interpreter` API (CPU-only in 2.2.0). For Kotlin, the GPU accelerator is built in; no extra artifact. Min API 23. Android GPU uses OpenCL, falling back to OpenGL |
-| LiteRT API (published alongside) | `com.google.ai.edge.litert:litert-api` | 2.2.0 | Transitive dependencies not checked yet |
+| LiteRT (TensorFlow Lite's new name) | `com.google.ai.edge.litert:litert` | **2.2.0** (GitHub release 2026-08-13) | Its own `classes.jar` has only the `Interpreter` API; the `CompiledModel` API arrives via `litert-api` (see below). For Kotlin, the GPU accelerator is built in; no extra artifact. Min API 23. Android GPU uses OpenCL, falling back to OpenGL |
+| LiteRT API (published alongside) | `com.google.ai.edge.litert:litert-api` | 2.2.0 | **Holds `CompiledModel`.** Pulled in transitively by `litert`; no need to declare it. Has no further dependencies |
 | Older GPU delegate line | `litert-gpu`, `litert-gpu-api`, `litert-support`, `litert-metadata` | 1.4.2 | Only for the older Interpreter-based GPU delegate. Not needed with `CompiledModel` |
 | Play services alternative | `com.google.android.gms:play-services-tflite-java` / `-gpu` | 16.5.0 | Interpreter API; runtime shipped by Play services |
 | CameraX | `androidx.camera:camera-core`, `camera-camera2`, `camera-lifecycle`, `camera-view` | **1.6.2** stable (1.7.0-alpha03 exists) | `ImageAnalysis` with `STRATEGY_KEEP_ONLY_LATEST` and `OUTPUT_IMAGE_FORMAT_RGBA_8888` |
 | Permission | `android.permission.CAMERA` | – | Request at runtime |
 
-**Unverified:** some developers report that `CompiledModel` GPU needs `<uses-native-library android:name="libOpenCL.so" android:required="false"/>` in the manifest. Official docs don't mention it; test on a device.
+**Answered (2026-09-13):** `CompiledModel` GPU does **not** need a hand-written `<uses-native-library android:name="libOpenCL.so">`. LiteRT's own AAR manifest already declares it, plus `libOpenCL-car.so`, `libOpenCL-pixel.so`, `libvndksupport.so` and the Qualcomm/Google Tensor/MTK NPU libraries.
 
 `CompiledModel` usage from the official docs:
 
@@ -76,13 +76,32 @@ Inference options:
 | kflite (`io.github.shadadman:kflite-core`, README version 3.4.0-alpha; GitHub release tag 4.90.90 on 2026-07-28) | Active, 71 stars. Android wraps TFLite/LiteRT; iOS needs a hand-written Podfile with the `TensorFlowLiteObjC` (+Metal/CoreML) pods. API: `Kflite.init(model = Res.readBytes(...))`, `Kflite.run(inputs, outputs)` | Useful reference or prototype. Alpha, and inherits the frozen iOS pods |
 | moko-tensorflow (`icerockdev/moko-tensorflow`) | Last push 2023-09-05, last release 0.2.1 (2021-07-13) | Abandoned |
 
+## Checks done (2026-09-13, in this project)
+
+1. **`litert-2.2.0.aar` inspected.** `jni/` contains `arm64-v8a`, `armeabi-v7a` and `x86_64` (`libLiteRt.so`, `libLiteRtClGlAccelerator.so`). **There is no `x86`**, so 32-bit x86 emulators will not work. The POM's only dependency is `litert-api:2.2.0`.
+2. **`CompiledModel` lives in `litert-api`, not `litert`.** `litert`'s `classes.jar` holds only the old `org.tensorflow.lite.Interpreter` API; `com.google.ai.edge.litert.CompiledModel`, `TensorBuffer`, `Accelerator` and `Environment` are in `litert-api`, which `litert` pulls in transitively. Depending on `litert` alone is enough. Verified signatures: `CompiledModel.create(AssetManager, String, Options)`, `Options(vararg Accelerator)`, `createInputBuffers()`, `run(inputs, outputs)`, `TensorBuffer.writeFloat(FloatArray)` / `readFloat()`, and `CompiledModel : AutoCloseable`.
+3. **The model runs on Android and matches the contract.** Measured on a Pixel_8 AVD (API 36, x86_64) with `Accelerator.CPU`, via `shared/src/androidDeviceTest/.../ReferenceImageTest.kt`:
+
+| Model | Image | Measured | Reference | Delta |
+|---|---|---|---|---|
+| default | `dog.png` | 0.9924486 | 0.99254 | 9.1e-05 |
+| default | `cat.jpg` | 0.0023325 | 0.00225 | 8.2e-05 |
+| optimized | `dog.png` | 0.9930208 | 0.99545 | 2.4e-03 |
+| optimized | `cat.jpg` | 0.0021034 | 0.00266 | 5.6e-04 |
+
+All well inside the contract's +/-0.02. The default model agreeing to ~1e-04 confirms the whole chain: RGB order, raw 0-255 values, bilinear resize, and no alpha premultiplication.
+
+4. **`dog.png` is PNG color type 6 (RGBA), but its alpha channel is uniformly 255.** `BitmapFactory` premultiplies RGB by alpha by default, while the reference was produced by OpenCV, which drops alpha without premultiplying. Because the image is fully opaque, the two agree. **If a future reference image has real transparency this breaks silently** - a premultiplied decode would shift the RGB values. Decode with `inPremultiplied = false` then, and note that `Bitmap.createScaledBitmap` rejects unpremultiplied bitmaps, so the resize would have to be done by hand.
+
+5. **Consuming LiteRT from an application needs `android.uniquePackageNames=false`.** `litert` and `litert-api` share the namespace `com.google.ai.edge.litert`. The `shared` library build only warns; `:androidApp:processDebugMainManifest` fails outright with "Namespace ... is used in multiple modules and/or libraries". `android.experimental.enableDuplicatePackageCheck=false` does **not** work - the property is `android.uniquePackageNames`.
+6. **APK size:** adding LiteRT took the debug APK from ~18 MB to ~47 MB, since all three ABIs are bundled (~24 MB of `.so`). An ABI split or `abiFilters` is worth doing before release.
+7. **The `<uses-native-library libOpenCL.so>` question from the Android runtime table is answered:** LiteRT's own manifest already declares it, along with the OpenCL, Qualcomm, Google Tensor and MTK NPU libraries. Apps do not need to add it.
+
 ## Checks not yet done
 
-1. Download `litert-2.2.0.aar`: confirm `jni/arm64-v8a` and `jni/x86_64` native libraries, the `CompiledModel` classes, and the POM's transitive dependencies. (The first attempt failed on a script error parsing the POM.)
-2. Run the default `.tflite` on an Android emulator/device with LiteRT 2.2.0 and compare with the reference outputs in MODEL_CONTRACT.md.
-3. Measure inference latency on a real device, CPU vs GPU, default vs optimized model.
-4. Core ML conversion with `coremltools` 9.0 in the ML project's Docker image (keep raw 0–255 image input: `ImageType(scale=1.0, bias=[0,0,0])`).
-5. Prove the CameraX `ImageAnalysis` RGBA → 128×128 float path gives the same result as the reference images.
+1. Measure inference latency on a real device, CPU vs GPU, default vs optimized model.
+2. Core ML conversion with `coremltools` 9.0 in the ML project's Docker image (keep raw 0–255 image input: `ImageType(scale=1.0, bias=[0,0,0])`).
+3. Prove the CameraX `ImageAnalysis` RGBA → 128×128 float path gives the same result as the reference images.
 
 ## Sources
 
