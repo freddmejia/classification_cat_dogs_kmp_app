@@ -9,6 +9,7 @@ import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
+import androidx.camera.core.UseCaseGroup
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.runtime.Composable
@@ -240,7 +241,12 @@ private class AndroidScanner(
                     .build()
                 built = imageAnalysis
                 provider.unbindAll()
-                provider.bindToLifecycle(lifecycleOwner, selectorFor(attempt), preview, imageAnalysis)
+                val group = UseCaseGroup.Builder()
+                    .addUseCase(preview)
+                    .addUseCase(imageAnalysis)
+                    .apply { view.viewPort?.let { setViewPort(it) } }
+                    .build()
+                provider.bindToLifecycle(lifecycleOwner, selectorFor(attempt), group)
             }.isSuccess
             if (bound) {
                 analysis = built
@@ -266,10 +272,16 @@ private class AndroidScanner(
             if (lastFrameAt != 0L && sinceLast < MIN_FRAME_INTERVAL_MS) return
             lastFrameAt = startedAt
             val outcome = runCatching {
-                val frame = FramePreparation.uprightSquare(it.toBitmap(), it.imageInfo.rotationDegrees)
+                val frame = FramePreparation.viewfinderSquare(
+                    it.toBitmap(),
+                    it.cropRect,
+                    it.imageInfo.rotationDegrees,
+                )
                 val engine = classifier
                     ?: AndroidCatDogClassifier(context.assets).also { created -> classifier = created }
-                engine.classify(frame).also { frame.recycle() }
+                val value = engine.classify(frame)
+                frame.recycle()
+                value
             }
             val latencyMs = ((System.nanoTime() - startedAt) / 1_000_000L).toInt()
             outcome.fold(
