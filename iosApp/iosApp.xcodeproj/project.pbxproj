@@ -72,6 +72,7 @@
 			buildConfigurationList = 8011146153A70B14E135D175 /* Build configuration list for PBXNativeTarget "iosApp" */;
 			buildPhases = (
 				6F8AD904A8C1E02A3CE726C7 /* Compile Kotlin Framework */,
+				A3C1D2E4F5061728394A5B6C /* Copy Model Files */,
 				E691868DB8916E59C984FBCC /* Sources */,
 				ED68E0888555F9E855177AF3 /* Frameworks */,
 				1E0518B6CADFD249104A18B8 /* Resources */,
@@ -153,6 +154,25 @@
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
 			shellScript = "if [ \"YES\" = \"$OVERRIDE_KOTLIN_BUILD_IDE_SUPPORTED\" ]; then\n  echo \"Skipping Gradle build task invocation due to OVERRIDE_KOTLIN_BUILD_IDE_SUPPORTED environment variable set to \\\"YES\\\"\"\n  exit 0\nfi\ncd \"$SRCROOT/..\"\n./gradlew :shared:embedAndSignAppleFrameworkForXcode\n";
+		};
+		A3C1D2E4F5061728394A5B6C /* Copy Model Files */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Copy Model Files";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -eu\nDESTINATION=\"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH\"\nmkdir -p \"$DESTINATION\"\ncp \"$SRCROOT/../shared/src/androidMain/assets/\"*.tflite \"$DESTINATION/\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 

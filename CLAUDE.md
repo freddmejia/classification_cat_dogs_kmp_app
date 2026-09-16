@@ -9,8 +9,8 @@ Guidance for Claude Code in this repository.
 As of 2026-09-13:
 - **Android inference works and is verified against the contract.** `AndroidCatDogClassifier` (LiteRT `CompiledModel`) loads the model from assets and classifies a `Bitmap`; `ReferenceImageTest` proves both models match the reference outputs on a device.
 - **The Android app works end to end:** one screen, live CameraX preview, a SCAN/STOP toggle, and a **continuously updating** result on top. Verified running on an emulator.
-- **Not started: the entire iOS path.** `Scanner.ios.kt` is a stub reporting `CameraStatus.Unavailable`, so the iOS app builds and shows "Camera unavailable". **That message is hardcoded, not a permission failure** - there is no camera code on iOS at all. It has never been compiled; there is no macOS here.
-- `Info.plist` now carries `NSCameraUsageDescription`. iOS **kills the app** rather than denying it if that key is missing when the camera is touched, so it has to be in place before any AVFoundation work starts.
+- **iOS mirrors Android (added 2026-09-16).** AVFoundation camera + TensorFlow Lite C 2.17.0 through cinterop, same `.tflite` files as Android. The app builds and links for device, and `ReferenceImageIosTest` passes on the simulator. **The live camera path has not yet been verified on a physical iPhone** - the simulator has no camera.
+- `Info.plist` carries `NSCameraUsageDescription`. iOS **kills the app** rather than denying it if that key is missing when the camera is touched.
 - **Git:** branch `main`, no remote yet.
 
 **Read first:**
@@ -81,8 +81,10 @@ One screen, `ScannerScreen`, over an `expect`/`actual` `Scanner`.
 | `ScannerScreen.kt` | commonMain | The whole UI. Pure Compose, no platform types |
 | `Theme.kt` | commonMain | Dark palette; `ScannerColors.Dog` is amber, `.Cat` is violet |
 | `Scanner.android.kt` | androidMain | CameraX + permission + LiteRT wiring |
-| `Scanner.ios.kt` | iosMain | Stub, always `Unavailable` |
 | `AndroidCatDogClassifier.kt` | androidMain | The model call. Knows nothing about the camera |
+| `Scanner.ios.kt` | iosMain | AVFoundation + permission + TFLite wiring; same state machine, throttle, smoothing and timeout as Android |
+| `IosCatDogClassifier.kt` | iosMain | TFLite C API call. Reads the input size from the model's tensor |
+| `IosFramePreparation.kt` | iosMain | Viewfinder square + rotation + bilinear resize, straight from BGRA/RGBA bytes into the float input |
 
 Things worth knowing before changing it:
 
@@ -114,6 +116,17 @@ A sideways dog reads as a cat at 97% confidence. Any orientation mistake in the 
 - **Never use `ProcessCameraProvider.hasCamera()` for this.** It physically opens the camera to probe it: on the emulator that opened the front camera, disconnected it, and left the rear preview black. `availableCameraInfos` + `CameraInfo.lensFacing` reads the same facts as metadata without opening anything.
 - The front camera preview is mirrored by `PreviewView`, but `ImageAnalysis` frames are **not**. That is fine here - a horizontal flip does not change cat vs dog - but it matters for anything orientation-sensitive.
 
+## iOS specifics
+
+- **TensorFlow Lite C 2.17.0 is not in git.** `:shared:downloadTensorFlowLiteC` fetches the CocoaPods CDN archive, checks its SHA-256 and unpacks `TensorFlowLiteC.xcframework` into `iosApp/Frameworks/` (gitignored). The cinterop tasks depend on it, so the first iOS build downloads ~80 MB. No CocoaPods needed.
+- `Config.xcconfig` links it (`-framework TensorFlowLiteC -lc++`, per-SDK search paths). The Gradle side passes the same flags to test executables. `kotlin.mpp.enableCInteropCommonization=true` lets `iosMain` see the cinterop API.
+- The **Copy Model Files** build phase copies every `.tflite` from `shared/src/androidMain/assets/` into the app bundle, so iOS always ships the same models as Android. `ModelContract.DEFAULT_MODEL_ASSET` picks which one runs.
+- **The resize is a hand-written bilinear (half-pixel centres), not CoreGraphics.** Measured on `cat_dog_mobilenetv3.tflite`: every `CGInterpolationQuality` was off by 5e-4 to 9e-3 on `dog.png`; the manual bilinear lands at **2e-6** (dog) and **5e-6** (cat). Do not swap it for `CGContextDrawImage` scaling.
+- **CoreImage does not render in the simulator test binary** (`createCGImage` returns null, even with the software renderer), which is one more reason the preprocessing works on raw bytes.
+- Camera frames are 1280x720 `32BGRA`. The crop is the preview's visible rect (`metadataOutputRectOfInterestForRect`), then its centre square, like Android's `viewfinderSquare`. Rotation comes from `AVCaptureDeviceRotationCoordinator.videoRotationAngleForHorizonLevelCapture` (clockwise degrees); `IosFramePreparationTest` pins the rotation direction. The buffers themselves are left unrotated - do not also set `videoRotationAngle` on the data output connection.
+- Denied permission cannot be re-prompted on iOS, so "Allow camera" opens the app's Settings page instead.
+- `ReferenceImageIosTest` uses the contract models (`cat_dog_mobilenetv3*.tflite`), not `DEFAULT_MODEL_ASSET`, because those are the ones with published reference values. Assets are read from `SCANNER_ASSETS_DIR`, which Gradle sets for the simulator test task.
+
 ## Planned architecture
 
 From [docs/RESEARCH.md](docs/RESEARCH.md):
@@ -121,7 +134,7 @@ From [docs/RESEARCH.md](docs/RESEARCH.md):
 - **UI is shared** with Compose Multiplatform.
 - **Camera and inference are native per platform,** behind a common Kotlin `expect`/`actual` interface.
 - **Android: done.** Camera and inference both work. LiteRT `com.google.ai.edge.litert:litert:2.2.0`. `CompiledModel` actually lives in the transitive `litert-api`; depending on `litert` is enough. The AAR ships `arm64-v8a`, `armeabi-v7a` and `x86_64` - **no `x86`**, so a 32-bit x86 emulator will not work. CameraX 1.6.2 `ImageAnalysis` with `STRATEGY_KEEP_ONLY_LATEST` and `OUTPUT_IMAGE_FORMAT_RGBA_8888` feeds it.
-- **iOS:** try Core ML first (convert with `coremltools` in the ML project); fall back to the `TensorFlowLiteObjC` pod if conversion fails or accuracy differs.
+- **iOS: implemented with TensorFlow Lite C** (see "iOS specifics"). Core ML remains an option for Neural Engine acceleration, but would need a converted model from the ML project.
 - **KMP camera/inference wrappers were evaluated and rejected** (CameraK delivers JPEG frames; peekaboo and moko-tensorflow are stale; kflite is alpha). Do not reach for them without re-reading RESEARCH.md.
 
 ## Toolchain (verified 2026-09-13)
@@ -149,10 +162,10 @@ Notes:
 | `./gradlew :androidApp:assembleDebug` | Build the Android app |
 | `./gradlew :shared:testAndroidHostTest` | Shared host (JVM) tests |
 | `./gradlew :shared:connectedAndroidDeviceTest` | **The reference test.** Needs an emulator or device |
-| `./gradlew :shared:iosSimulatorArm64Test` | Shared iOS tests (macOS only) |
+| `./gradlew :shared:iosSimulatorArm64Test` | Shared iOS tests including `ReferenceImageIosTest` (macOS only) |
 | `./gradlew :androidApp:installDebug` | Install on a connected device/emulator |
 
-The iOS app is built from Xcode by opening `iosApp/`. macOS and Xcode >= 26.4 are required; neither is available on this machine, so **iOS changes cannot be compiled or tested here** - say so rather than claiming they work.
+The iOS app is built from Xcode by opening `iosApp/`. macOS and Xcode >= 26.4 are required. The project is opened on both Windows and macOS; on Windows, iOS changes cannot be compiled or tested - say so rather than claiming they work.
 
 ## Conventions
 
@@ -161,7 +174,7 @@ The iOS app is built from Xcode by opening `iosApp/`. macOS and Xcode >= 26.4 ar
 - Reusable logic belongs in `shared/src/commonMain`; keep platform code to the thin `actual` layer.
 - **Preprocessing at inference time must match training:** same resize, same 0-255 scaling, RGB order.
 - Keep `build/`, `.gradle/`, `.kotlin/` and `local.properties` out of git (`.gitignore` covers them).
-- `java` is not on `PATH` here. Gradle needs `JAVA_HOME="/c/Program Files/Android/Android Studio/jbr"` (Git Bash) before `./gradlew`.
+- `java` is not on `PATH`. Gradle needs `JAVA_HOME` pointing at Android Studio's JBR before `./gradlew`: `"/c/Program Files/Android/Android Studio/jbr"` on Windows (Git Bash), `"/Applications/Android Studio Quali1.app/Contents/jbr/Contents/Home"` on the Mac.
 - **Do not add `androidx.core:core-ktx` at the catalog's 1.19.0.** It requires compileSdk 37 and AGP 9.1+, and fails `checkDebugAarMetadata` on this project's compileSdk 36 / AGP 9.0.1. The entry sits unused in `libs.versions.toml`; `ContextCompat` already arrives transitively through CameraX.
 - **`androidApp/src/main/AndroidManifest.xml` strips five permissions with `tools:node="remove"`.** LiteRT's manifest contributes `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_DATA_SYNC`, `WAKE_LOCK`, `ACCESS_NETWORK_STATE` and `RECEIVE_BOOT_COMPLETED` for its AiPack model-download feature, which this app does not use - it loads the model from assets. The merged manifest is now just `CAMERA`. If AiPack is ever adopted, drop those removals.
 - **`android.uniquePackageNames=false` in `gradle.properties` is load-bearing - do not remove it.** `litert` and `litert-api` both declare the namespace `com.google.ai.edge.litert`. Building the `shared` library only warns, but merging that into `androidApp` is a hard error and `:androidApp:processDebugMainManifest` fails. Both artifacts are required, so the check has to be downgraded. The remaining warning is expected.

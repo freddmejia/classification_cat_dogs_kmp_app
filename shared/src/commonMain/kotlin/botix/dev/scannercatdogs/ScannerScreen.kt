@@ -134,7 +134,7 @@ private fun ResultBanner(
             when (kind) {
                 BannerKind.Unavailable -> Message(
                     title = "Camera unavailable",
-                    body = "This platform has no scanner yet.",
+                    body = "No usable camera was found on this device.",
                 )
 
                 BannerKind.Permission -> PermissionRequest(onRequestPermission)
