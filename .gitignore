@@ -19,3 +19,6 @@ captures
 node_modules/
 
 iosApp/Frameworks/
+*.apk
+*.dm
+androidApp/release/output-metadata.json
