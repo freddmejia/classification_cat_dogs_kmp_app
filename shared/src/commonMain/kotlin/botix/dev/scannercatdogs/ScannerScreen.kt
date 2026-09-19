@@ -10,6 +10,7 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -33,9 +34,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlin.math.roundToInt
 
 private const val CONFIDENCE_FLOOR = 0.65f
 
@@ -56,6 +59,7 @@ fun ScannerScreen(scanner: Scanner = rememberScanner()) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
+                .pinchToZoom(scanner, enabled = status == CameraStatus.Ready && scanner.canZoom)
                 .background(
                     Brush.verticalGradient(
                         0f to ScannerColors.Background.copy(alpha = 0.92f),
@@ -78,6 +82,13 @@ fun ScannerScreen(scanner: Scanner = rememberScanner()) {
             ResultBanner(state, status, scanner.isRunning, accent, scanner::requestPermission)
             Spacer(Modifier.weight(1f))
             if (status == CameraStatus.Ready) {
+                if (scanner.canZoom) {
+                    ZoomChip(
+                        ratio = scanner.zoomRatio,
+                        onReset = { scanner.zoomBy(scanner.minZoomRatio / scanner.zoomRatio) },
+                    )
+                    Spacer(Modifier.height(16.dp))
+                }
                 Box(
                     modifier = Modifier.fillMaxWidth(),
                     contentAlignment = Alignment.Center,
@@ -330,6 +341,29 @@ private fun LensButton(lens: Lens, onClick: () -> Unit, modifier: Modifier) {
     }
 }
 
+@Composable
+private fun ZoomChip(ratio: Float, onReset: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .clip(CircleShape)
+            .background(ScannerColors.Surface.copy(alpha = 0.9f))
+            .border(1.dp, ScannerColors.Outline, CircleShape)
+            .clickable(onClick = onReset)
+            .padding(horizontal = 16.dp, vertical = 7.dp),
+    ) {
+        Text(
+            text = zoomText(ratio),
+            color = ScannerColors.OnSurface,
+            fontSize = 13.sp,
+        )
+    }
+}
+
+private fun Modifier.pinchToZoom(scanner: Scanner, enabled: Boolean): Modifier =
+    if (!enabled) this else pointerInput(scanner) {
+        detectTransformGestures(panZoomLock = true) { _, _, zoom, _ -> scanner.zoomBy(zoom) }
+    }
+
 private enum class BannerKind { Unavailable, Permission, Starting, Failure, Waiting, Result, Idle }
 
 private fun bannerKind(state: ScanState, status: CameraStatus): BannerKind = when {
@@ -352,6 +386,11 @@ private fun accentOf(state: ScanState): Color = when {
 private fun percentText(value: Float): String {
     val percent = (value * 100f).toInt().coerceIn(0, 100)
     return percent.toString() + "%"
+}
+
+private fun zoomText(value: Float): String {
+    val scaled = (value * 10f).roundToInt().coerceIn(1, 999)
+    return (scaled / 10).toString() + "." + (scaled % 10).toString() + "x"
 }
 
 private fun decimalText(value: Float): String {

@@ -47,7 +47,10 @@ import platform.AVFoundation.AVLayerVideoGravityResizeAspectFill
 import platform.AVFoundation.AVMediaTypeVideo
 import platform.AVFoundation.authorizationStatusForMediaType
 import platform.AVFoundation.defaultDeviceWithDeviceType
+import platform.AVFoundation.maxAvailableVideoZoomFactor
+import platform.AVFoundation.minAvailableVideoZoomFactor
 import platform.AVFoundation.requestAccessForMediaType
+import platform.AVFoundation.videoZoomFactor
 import platform.CoreFoundation.CFRetain
 import platform.CoreGraphics.CGRectMake
 import platform.CoreMedia.CMSampleBufferGetImageBuffer
@@ -178,6 +181,15 @@ private class IosScanner(
     override var canSwitchLens: Boolean by mutableStateOf(false)
         private set
 
+    override var zoomRatio: Float by mutableStateOf(1f)
+        private set
+
+    override var minZoomRatio: Float by mutableStateOf(1f)
+        private set
+
+    override var maxZoomRatio: Float by mutableStateOf(1f)
+        private set
+
     private val session = AVCaptureSession()
     private val output = AVCaptureVideoDataOutput()
     private val delegate = FrameDelegate(::onFrame)
@@ -259,6 +271,25 @@ private class IosScanner(
         lens = if (lens == Lens.BACK) Lens.FRONT else Lens.BACK
         smoothed = null
         configureSession()
+    }
+
+    override fun zoomBy(factor: Float) {
+        if (released || !factor.isFinite() || factor <= 0f) return
+        val device = boundDevice ?: return
+        val target = (zoomRatio * factor).coerceIn(minZoomRatio, maxZoomRatio)
+        if (target == zoomRatio) return
+        if (!device.lockForConfiguration(null)) return
+        device.videoZoomFactor = target.toDouble()
+        device.unlockForConfiguration()
+        zoomRatio = target
+    }
+
+    private fun readZoomRange(device: AVCaptureDevice) {
+        val min = device.minAvailableVideoZoomFactor.toFloat()
+        val max = device.maxAvailableVideoZoomFactor.toFloat()
+        minZoomRatio = min
+        maxZoomRatio = max.coerceAtMost(ZOOM_RATIO_CEILING).coerceAtLeast(min)
+        zoomRatio = device.videoZoomFactor.toFloat().coerceIn(minZoomRatio, maxZoomRatio)
     }
 
     private fun attachDelegate() {
@@ -345,6 +376,7 @@ private class IosScanner(
             boundDevice = device
             rotationCoordinator = AVCaptureDeviceRotationCoordinator(device, view.previewLayer)
             cameraStatus = CameraStatus.Ready
+            readZoomRange(device)
             attachDelegate()
             dispatch_async(sessionQueue) {
                 if (!session.running) session.startRunning()

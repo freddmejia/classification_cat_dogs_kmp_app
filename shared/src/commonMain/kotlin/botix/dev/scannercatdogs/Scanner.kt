@@ -15,6 +15,8 @@ enum class CameraStatus { Starting, PermissionRequired, Ready, Unavailable }
 
 enum class Lens { BACK, FRONT }
 
+const val ZOOM_RATIO_CEILING = 8f
+
 @Stable
 interface Scanner {
     val scanState: ScanState
@@ -22,11 +24,17 @@ interface Scanner {
     val cameraStatus: CameraStatus
     val lens: Lens
     val canSwitchLens: Boolean
+    val zoomRatio: Float
+    val minZoomRatio: Float
+    val maxZoomRatio: Float
     fun requestPermission()
     fun switchLens()
+    fun zoomBy(factor: Float)
     fun start()
     fun stop()
 }
+
+val Scanner.canZoom: Boolean get() = maxZoomRatio > minZoomRatio + 0.01f
 
 @Composable
 expect fun rememberScanner(): Scanner

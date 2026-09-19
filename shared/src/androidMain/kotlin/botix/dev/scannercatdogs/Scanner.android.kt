@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
@@ -110,6 +111,15 @@ private class AndroidScanner(
     override var canSwitchLens: Boolean by mutableStateOf(false)
         private set
 
+    override var zoomRatio: Float by mutableStateOf(1f)
+        private set
+
+    override var minZoomRatio: Float by mutableStateOf(1f)
+        private set
+
+    override var maxZoomRatio: Float by mutableStateOf(1f)
+        private set
+
     var permissionRequester: (() -> Unit)? = null
 
     private val analysisExecutor: ExecutorService = Executors.newSingleThreadExecutor()
@@ -124,6 +134,7 @@ private class AndroidScanner(
     private var lastFrameAt = 0L
 
     private var classifier: AndroidCatDogClassifier? = null
+    private var camera: Camera? = null
     private var cameraProvider: ProcessCameraProvider? = null
     private var analysis: ImageAnalysis? = null
     private var previewView: PreviewView? = null
@@ -182,6 +193,15 @@ private class AndroidScanner(
         cameraProvider?.let { bindUseCases(it) }
     }
 
+    override fun zoomBy(factor: Float) {
+        if (released || !factor.isFinite() || factor <= 0f) return
+        val control = camera?.cameraControl ?: return
+        val target = (zoomRatio * factor).coerceIn(minZoomRatio, maxZoomRatio)
+        if (target == zoomRatio) return
+        zoomRatio = target
+        runCatching { control.setZoomRatio(target) }
+    }
+
     private fun attachAnalyzer() {
         val target = analysis ?: return
         if (running) target.setAnalyzer(analysisExecutor, ::onFrame) else target.clearAnalyzer()
@@ -231,7 +251,7 @@ private class AndroidScanner(
         val attempts = if (lens == Lens.BACK) listOf(Lens.BACK, Lens.FRONT) else listOf(Lens.FRONT, Lens.BACK)
         for (attempt in attempts) {
             var built: ImageAnalysis? = null
-            val bound = runCatching {
+            val bound = runCatching<Camera> {
                 val preview = Preview.Builder().build().apply {
                     surfaceProvider = view.surfaceProvider
                 }
@@ -247,21 +267,33 @@ private class AndroidScanner(
                     .apply { view.viewPort?.let { setViewPort(it) } }
                     .build()
                 provider.bindToLifecycle(lifecycleOwner, selectorFor(attempt), group)
-            }.isSuccess
-            if (bound) {
+            }.getOrNull()
+            if (bound != null) {
                 analysis = built
+                camera = bound
                 lens = attempt
                 boundLens = attempt
                 boundOwner = lifecycleOwner
                 cameraStatus = CameraStatus.Ready
+                readZoomRange(bound)
                 attachAnalyzer()
                 return
             }
         }
         analysis = null
+        camera = null
         boundLens = null
         boundOwner = null
         cameraStatus = CameraStatus.Unavailable
+    }
+
+    private fun readZoomRange(bound: Camera) {
+        val state = bound.cameraInfo.zoomState.value
+        val min = state?.minZoomRatio ?: 1f
+        val max = state?.maxZoomRatio ?: 1f
+        minZoomRatio = min
+        maxZoomRatio = max.coerceAtMost(ZOOM_RATIO_CEILING).coerceAtLeast(min)
+        zoomRatio = (state?.zoomRatio ?: min).coerceIn(minZoomRatio, maxZoomRatio)
     }
 
     private fun onFrame(image: ImageProxy) {
@@ -326,6 +358,7 @@ private class AndroidScanner(
         owner = null
         boundOwner = null
         boundLens = null
+        camera = null
         analysisExecutor.shutdown()
         runCatching { analysisExecutor.awaitTermination(500, TimeUnit.MILLISECONDS) }
         classifier?.close()

@@ -7,8 +7,8 @@ object ModelContract {
     const val CHANNELS = 3
     const val INPUT_FLOAT_COUNT = INPUT_SIZE * INPUT_SIZE * CHANNELS
     const val DOG_THRESHOLD = 0.5f
-    const val DEFAULT_MODEL_ASSET = "cat_dog_mobilenetv3DataAugmentationZoomOutV4.tflite"
-    const val OPTIMIZED_MODEL_ASSET = "cat_dog_mobilenetv3DataAugmentationZoomOutV4_optimized.tflite"
+    const val DEFAULT_MODEL_ASSET = "cat_dog_EfficientNetB0_Top5Light_fine_tuning.tflite"
+    const val OPTIMIZED_MODEL_ASSET = "cat_dog_EfficientNetB0_Top5Light_fine_tuning_optimized.tflite"
 }
 
 data class Classification(val dogProbability: Float) {
